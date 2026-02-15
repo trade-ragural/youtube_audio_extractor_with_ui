@@ -7,6 +7,8 @@ Unified transcription module supporting:
 import os
 import time
 import math
+import requests
+import json
 from dataclasses import dataclass
 from typing import List, Optional, Dict
 
@@ -249,6 +251,44 @@ def refine_text_gemini(client: genai.Client, text: str, lang: str) -> str:
         return text
 
 
+def refine_text_ollama(text: str, lang: str) -> str:
+    """Refines text using local Ollama model (llama3.2:latest)."""
+    if not text or not text.strip():
+        return text
+
+    prompt = f"""You are a strict text refinement tool. Improve punctuation and capitalization.
+Language: {lang}
+Output ONLY a JSON object with a single key "refined_text".
+Do NOT change words or meaning.
+
+Text:
+{text}"""
+    
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "llama3.2:latest",
+                "prompt": prompt,
+                "format": "json",
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "num_ctx": 4096 
+                }
+            },
+            timeout=120
+        )
+        response.raise_for_status()
+        data = response.json()
+        raw_str = data.get("response", "{}")
+        parsed = json.loads(raw_str)
+        return parsed.get("refined_text", text).strip()
+    except Exception as e:
+        print(f"Ollama refinement failed: {e}")
+        return text
+
+
 def transcribe_all_chunks(
     chunks,
     youtube_url: Optional[str] = None,
@@ -269,18 +309,19 @@ def transcribe_all_chunks(
             yt_results = fetch_youtube_transcript(video_id, chunks)
             if yt_results:
                 if progress_callback:
-                    progress_callback(0.3, "Refining transcript with Gemini (adding punctuation)...")
+                    progress_callback(0.3, "Refining transcript with Llama 3.2 (Local)...")
                 
-                # Refine with Gemini in parallel
-                client = _get_client()
+                # Refine with Ollama in parallel (limited concurrency for local model)
                 total = len(yt_results)
                 completed = 0
                 
                 def refine_task(result):
-                    refined_text = refine_text_gemini(client, result.text, result.language)
+                    # Use Ollama
+                    refined_text = refine_text_ollama(result.text, result.language)
                     return result, refined_text
 
-                with ThreadPoolExecutor(max_workers=2) as executor:
+                # Use mostly sequential or low concurrency for local LLM to avoid OOM
+                with ThreadPoolExecutor(max_workers=1) as executor:
                     futures = [executor.submit(refine_task, r) for r in yt_results]
                     
                     for future in as_completed(futures):
